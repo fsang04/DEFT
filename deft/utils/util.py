@@ -958,7 +958,7 @@ class Train_DEFTData(Dataset):
     """
 
     def __init__(self, BDLO_type, n_parent_vertices, n_children_vertices, n_branch,
-                 rigid_body_coupling_index, train_set_number, total_time, training_time_horizon, device):
+                 rigid_body_coupling_index, train_set_number, total_time, training_time_horizon, device, frame_stride: int = 1):
         super(Train_DEFTData, self).__init__()
         # Root directory containing data
         self.root_dir = "../dataset/BDLO%s/train/" % BDLO_type
@@ -1047,11 +1047,95 @@ class Eval_DEFTData(Dataset):
     """
 
     def __init__(self, BDLO_type, n_parent_vertices, n_children_vertices, n_branch,
-                 rigid_body_coupling_index, eval_set_number, total_time, eval_time_horizon, device):
+                 rigid_body_coupling_index, eval_set_number, total_time, eval_time_horizon, device, frame_stride: int = 1):
         super(Eval_DEFTData, self).__init__()
         # Root directory for evaluation data
-        self.root_dir = "../dataset/BDLO%s/eval/" % BDLO_type
-        file_list = glob.glob(self.root_dir + "*")
+        # self.root_dir = "../dataset/BDLO%s/eval/" % BDLO_type
+        # file_list = glob.glob(self.root_dir + "*")
+        repo_root = Path(__file__).resolve().parents[2]
+        self.root_dir = repo_root / "dataset" / f"BDLO{BDLO_type}" / "eval"
+        file_list = sorted(self.root_dir.glob("*"))
+        self.device = device
+
+        self.BDLOs_previous_vertices = []
+        self.BDLOs_vertices = []
+        self.BDLOs_target_vertices = []
+
+        n_child1_vertices, n_child2_vertices = n_children_vertices
+
+        # Hard-coded transformations
+        point1 = np.array([0.652495, 0.012239, -0.703962])
+        point2 = np.array([0.359612, 0.012701, -0.701503])
+        point3 = np.array([0.358077, 0.009511, -0.995053])
+        midpoint = np.array([
+            point2[0] + (point1[0] - point2[0]) / 2.,
+            (point1[1] + point2[1] + point3[1]) / 3,
+            point2[2] - (point2[2] - point3[2]) / 2.
+        ])
+        midpoint_mod = torch.tensor(np.array([-midpoint[2], -midpoint[0], midpoint[1]]))
+
+        if frame_stride < 1:
+            raise ValueError(f"frame_stride must be >= 1, got {frame_stride}")
+
+        bar = tqdm(file_list)
+        for rope_data in bar:
+            # Same reading procedure as training set
+            verts = torch.tensor(pd.read_pickle(r'%s' % str(rope_data))) \
+                .view(3, total_time, -1).permute(1, 2, 0)
+            if frame_stride > 1:
+                verts = verts[::frame_stride]
+                total_length = verts.shape[0]
+
+            parent_vertices = verts[:, :n_parent_vertices]
+            child1_vertices = verts[:, n_parent_vertices: n_parent_vertices + n_child1_vertices - 1]
+            child2_vertices = verts[:, n_parent_vertices + n_child1_vertices - 1:]
+
+            BDLO_vert_no_trans = construct_BDLOs_data(total_length, rigid_body_coupling_index, # changed to total_length for frame skipping
+                                                      n_parent_vertices, n_children_vertices,
+                                                      n_branch, parent_vertices, child1_vertices, child2_vertices)
+            BDLO_vert = torch.zeros_like(BDLO_vert_no_trans)
+            BDLO_vert[:, :, :, 0] = -BDLO_vert_no_trans[:, :, :, 2]
+            BDLO_vert[:, :, :, 1] = -BDLO_vert_no_trans[:, :, :, 0]
+            BDLO_vert[:, :, :, 2] = BDLO_vert_no_trans[:, :, :, 1]
+
+            # We only take the first [eval_time_horizon] chunk for the previous, current, target.
+            if not BDLO_vert[0: 0 + eval_time_horizon].size() == (eval_time_horizon, n_branch, n_parent_vertices, 3):
+                print("False Size")
+            self.BDLOs_previous_vertices.append(BDLO_vert[0: 0 + eval_time_horizon].numpy())
+            self.BDLOs_vertices.append(BDLO_vert[1: 1 + eval_time_horizon].numpy())
+            self.BDLOs_target_vertices.append(BDLO_vert[2: 2 + eval_time_horizon].numpy())
+
+        self.previous_vertices = np.array(self.BDLOs_previous_vertices)
+        self.vertices = np.array(self.BDLOs_vertices)
+        self.target_vertices = np.array(self.BDLOs_target_vertices)
+
+    def __len__(self):
+        # Number of evaluation sequences
+        return len(self.vertices)
+
+    def __getitem__(self, index):
+        # Return (previous, current, target)
+        previous_vertices = torch.tensor(self.previous_vertices[index]).to(self.device)
+        vertices = torch.tensor(self.vertices[index]).to(self.device)
+        target_vertices = torch.tensor(self.target_vertices[index]).to(self.device)
+        return (previous_vertices.clone().detach(),
+                vertices.clone().detach(),
+                target_vertices.clone().detach())
+
+class Test_DEFTData(Dataset):
+    """
+    A PyTorch Dataset for loading and transforming evaluation data for DEFT-based rod simulation.
+    Each data item is (previous_vertices, current_vertices, target_vertices), typically over a longer time horizon.
+    """
+
+    def __init__(self, BDLO_type, n_parent_vertices, n_children_vertices, n_branch,
+                 rigid_body_coupling_index, eval_set_number, total_time, eval_time_horizon, device):
+        super(Test_DEFTData, self).__init__()
+        # Root directory for evaluation data
+        # changed by Shicheng
+        repo_root = Path(__file__).resolve().parents[2]
+        self.root_dir = repo_root / "dataset" / f"BDLO{BDLO_type}" / "test"
+        file_list = sorted(self.root_dir.glob("*"))
         self.device = device
 
         self.BDLOs_previous_vertices = []
@@ -1074,16 +1158,51 @@ class Eval_DEFTData(Dataset):
         bar = tqdm(file_list)
         for rope_data in bar:
             # Same reading procedure as training set
-            verts = torch.tensor(pd.read_pickle(r'%s' % str(rope_data))) \
-                .view(3, total_time, -1).permute(1, 2, 0)
+            # verts = torch.tensor(pd.read_pickle(r'%s' % str(rope_data))) \
+            #     .view(3, total_time, -1).permute(1, 2, 0)
+
+            raw = torch.tensor(pd.read_pickle(r"%s" % str(rope_data)))
+
+            # compute the numbr of data point in each frame
+            n_child1_vertices, n_child2_vertices = n_children_vertices
+            n_points_per_frame = n_parent_vertices + (n_child1_vertices - 1) + (n_child2_vertices - 1)
+
+            # real total_time from the data
+            den = 3 * n_points_per_frame
+            if raw.numel() % den != 0:
+                raise RuntimeError(
+                    f"{rope_data}: raw.numel()={raw.numel()} not divisible by 3*n_points_per_frame={den}"
+                )
+            real_total_time = raw.numel() // den
+
+            # if the real time of pkl file is longer, extract the time to total_time specified
+            used_time = min(total_time, real_total_time)
+            if used_time < eval_time_horizon + 2:
+                continue
+
+            # reshape data into [3, time, number of vertices points]
+            verts = raw.view(3, real_total_time, n_points_per_frame).permute(1, 2, 0)
+
+            # delete missing data
+            finite_mask = torch.isfinite(verts).all(dim=(1, 2)) 
+            verts = verts[finite_mask]
+
+            verts = verts[:used_time]
 
             parent_vertices = verts[:, :n_parent_vertices]
             child1_vertices = verts[:, n_parent_vertices: n_parent_vertices + n_child1_vertices - 1]
             child2_vertices = verts[:, n_parent_vertices + n_child1_vertices - 1:]
 
-            BDLO_vert_no_trans = construct_BDLOs_data(total_time, rigid_body_coupling_index,
-                                                      n_parent_vertices, n_children_vertices,
-                                                      n_branch, parent_vertices, child1_vertices, child2_vertices)
+            # BDLO_vert_no_trans = construct_BDLOs_data(total_time, rigid_body_coupling_index,
+            #                                           n_parent_vertices, n_children_vertices,
+            #                                           n_branch, parent_vertices, child1_vertices, child2_vertices)
+
+            BDLO_vert_no_trans = construct_BDLOs_data(
+                used_time, rigid_body_coupling_index,
+                n_parent_vertices, n_children_vertices,
+                n_branch, parent_vertices, child1_vertices, child2_vertices
+            )
+
             BDLO_vert = torch.zeros_like(BDLO_vert_no_trans)
             BDLO_vert[:, :, :, 0] = -BDLO_vert_no_trans[:, :, :, 2]
             BDLO_vert[:, :, :, 1] = -BDLO_vert_no_trans[:, :, :, 0]

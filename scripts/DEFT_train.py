@@ -23,14 +23,98 @@ import os
 import argparse
 import matplotlib.pyplot as plt
 
+# changed by felicia: 
+import itertools
+from collections import deque # import for grid search
 
-def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, inference_vis, inference_1_batch,
-          residual_learning, clamp_type, load_model):
+class EarlyStoppingTracker:
+    """Track eval losses and detect consistent increases"""
+    def __init__(self, patience=5, min_delta=0.0):
+        self.patience = patience  # How many eval periods to wait
+        self.min_delta = min_delta  # Minimum change to qualify as improvement
+        self.counter = 0
+        self.best_loss = None
+        self.should_stop = False
+        self.loss_history = deque(maxlen=patience)
+    
+    def __call__(self, eval_loss):
+        self.loss_history.append(eval_loss)
+        
+        if self.best_loss is None:
+            self.best_loss = eval_loss
+            return False
+        
+        # Check if loss improved
+        if eval_loss < (self.best_loss - self.min_delta):
+            self.best_loss = eval_loss
+            self.counter = 0
+            return False
+        
+        # Loss didn't improve
+        self.counter += 1
+        
+        # Check if consistently increasing
+        if len(self.loss_history) >= self.patience:
+            recent_losses = list(self.loss_history)
+            is_increasing = all(recent_losses[i] >= recent_losses[i-1] 
+                              for i in range(1, len(recent_losses)))
+            if is_increasing or self.counter >= self.patience:
+                self.should_stop = True
+                return True
+        
+        return False
+        
+def train(
+    train_batch, 
+    BDLO_type, 
+    total_time, 
+    train_time_horizon, 
+    undeform_vis, 
+    inference_vis, 
+    inference_1_batch,
+    residual_learning, 
+    clamp_type, 
+    load_model,
+    dt: float = 0.02,
+    data_dt: float = 0.01,
+    frame_stride: int | None = None,
+    integration_substeps: int = 2,
+    # NEW PARAMETERS for grid search:
+    bend_stiffness_parent_init=None,
+    bend_stiffness_child1_init=None,
+    bend_stiffness_child2_init=None,
+    damping_parent_init=None,
+    damping_child1_init=None,
+    damping_child2_init=None,
+    early_stopping_patience=5,  # changed: Number of eval periods before stopping
+    training_case=5,  # changed: currently set to 5 for testing.  pass as parameter t incremenet during grid search
+    grid_search=False,  # changed: flag to enable early stopping only during grid search
+):  
+    # total_time is the number of *effective* timesteps returned by the dataloader / simulated by the model.
+    #
+    # If the dataset pickles are recorded at `data_dt` (e.g. 0.01s) but we want to simulate at a larger
+    # timestep `dt` (e.g. 0.05s), we downsample dataset frames by:
+    #   frame_stride = dt / data_dt   (must be an integer)
+    #
+    # The dataset reader will then load `total_time * frame_stride` raw frames from disk and keep every
+    # `frame_stride`-th frame, returning sequences of length `total_time` that match the simulation dt.
+    if frame_stride is None:
+        frame_stride = int(round(dt / data_dt))
+    if frame_stride < 1:
+        raise ValueError(f"frame_stride must be >= 1, got {frame_stride}")
+    if not np.isclose(frame_stride * data_dt, dt):
+        raise ValueError(
+            f"dt ({dt}) must be an integer multiple of data_dt ({data_dt}). "
+            f"Got frame_stride={frame_stride} -> {frame_stride * data_dt}."
+        )
+    if total_time < 3:
+        raise ValueError(f"total_time must be >= 3, got {total_time}")
+    
     # The total_time parameter is the maximum timesteps of the loaded data
     # The train_time_horizon is how many timesteps to unroll the simulation during training
     # The function trains or partially fine-tunes a DEFT model for a specific branched BDLO type
 
-    eval_time_horizon = total_time - 2  # Number of timesteps for evaluation
+    eval_time_horizon = (total_time // frame_stride) - 2  # effective timesteps after downsampling  # Number of timesteps for evaluation
 
     # Explanation of notation in the code:
     # - undeformed_BDLO: A tensor containing the initial (undeformed) vertex positions of the branched BDLO
@@ -79,14 +163,28 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         if n_parent_vertices <= max(cs_n_vert):
             raise Exception("warning: number of parent's vertices is larger than children's!")
 
-        # Define the stiffness parameters as nn.Parameters for optimization or subsequent usage
-        bend_stiffness_parent = nn.Parameter(4e-3 * torch.ones((1, 1, n_edge), device=device))
-        bend_stiffness_child1 = nn.Parameter(4e-3 * torch.ones((1, 1, n_edge), device=device))
-        bend_stiffness_child2 = nn.Parameter(4e-3 * torch.ones((1, 1, n_edge), device=device))
-        twist_stiffness = nn.Parameter(1e-4 * torch.ones((1, n_branch, n_edge), device=device))
+        # # Define the stiffness parameters as nn.Parameters for optimization or subsequent usage
+        # bend_stiffness_parent = nn.Parameter(4e-3 * torch.ones((1, 1, n_edge), device=device))
+        # bend_stiffness_child1 = nn.Parameter(4e-3 * torch.ones((1, 1, n_edge), device=device))
+        # bend_stiffness_child2 = nn.Parameter(4e-3 * torch.ones((1, 1, n_edge), device=device))
+        # twist_stiffness = nn.Parameter(1e-4 * torch.ones((1, n_branch, n_edge), device=device))
 
-        # Damping parameters for each branch
-        damping = nn.Parameter(torch.tensor((2.5, 2.5, 2.5), device=device))
+        # # Damping parameters for each branch
+        # damping = nn.Parameter(torch.tensor((2.5, 3, 3), device=device)) # changed (2.5, 2.5, 2.5)
+        
+        # changed by felicia: use grid search values if available 
+        bs_parent_val = bend_stiffness_parent_init if bend_stiffness_parent_init else 4e-3
+        bs_child1_val = bend_stiffness_child1_init if bend_stiffness_child1_init else 4e-3
+        bs_child2_val = bend_stiffness_child2_init if bend_stiffness_child2_init else 4e-3
+        damp_parent_val = damping_parent_init if damping_parent_init else 2.5
+        damp_child1_val = damping_child1_init if damping_child1_init else 3.0
+        damp_child2_val = damping_child2_init if damping_child2_init else 3.0
+
+        bend_stiffness_parent = nn.Parameter(bs_parent_val * torch.ones((1, 1, n_edge), device=device))
+        bend_stiffness_child1 = nn.Parameter(bs_child1_val * torch.ones((1, 1, n_edge), device=device))
+        bend_stiffness_child2 = nn.Parameter(bs_child2_val * torch.ones((1, 1, n_edge), device=device))
+        twist_stiffness = nn.Parameter(1e-4 * torch.ones((1, n_branch, n_edge), device=device)) # keep same
+        damping = nn.Parameter(torch.tensor((damp_parent_val, damp_child1_val, damp_child2_val), device=device))
 
         # If we use residual learning, learning_weight is used to scale the residual from the GNN
         if residual_learning:
@@ -355,7 +453,7 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
     )
 
     # Timestep for simulation
-    dt = 0.01
+    dt = 0.02 # changed
 
     # Instantiate DEFT_sim objects for training and evaluation
     DEFT_sim_train = DEFT_sim(
@@ -529,7 +627,8 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
             eval_set_number,
             total_time,
             eval_time_horizon,
-            device
+            device,
+            frame_stride=frame_stride
         )
         eval_data_len = len(eval_dataset)
         train_dataset = Train_DEFTData(
@@ -541,7 +640,8 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
             train_set_number,
             total_time,
             train_time_horizon,
-            device
+            device,
+            frame_stride=frame_stride
         )
         train_data_loader = DataLoader(train_dataset, batch_size=train_batch, shuffle=True, drop_last=True)
 
@@ -556,7 +656,8 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
             eval_set_number,
             total_time,
             eval_time_horizon,
-            device
+            device,
+            frame_stride=frame_stride
         )
         eval_data_len = len(eval_dataset)
         train_dataset = Train_DEFTData(
@@ -568,16 +669,24 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
             train_set_number,
             total_time,
             train_time_horizon,
-            device
+            device,
+            frame_stride=frame_stride
         )
         train_data_loader = DataLoader(train_dataset, batch_size=train_batch, shuffle=True, drop_last=True)
 
     # Define number of epochs to train
-    train_epoch = 100
+    train_epoch = 100 
     save_steps = 0
     evaluate_period = 20
     model = "DEFT"
-    training_case = 1
+    # training_case = 2 # comment out for grid search adjustments 
+
+    # changed: Initialize early stopping tracker
+    # If eval loss hasn't improved in the last `patience` evals, stop training this param combination
+    early_stopping_tracker = EarlyStoppingTracker(
+        patience=early_stopping_patience,
+        min_delta=1e-6  # minimum change to count as loss improvement
+    )
 
     # The main training loop
     if model == "DEFT":
@@ -631,9 +740,13 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
                                 vis_type=vis_type,
                                 vis=vis
                             )
+
+                            # changed: After evaluation, check for early stopping in grid search
+                            current_eval_loss = traj_loss_eval.cpu().detach().numpy() / total_time
+
                             # Print and record the average loss
-                            print(np.sqrt(traj_loss_eval.cpu().detach().numpy() / total_time))
-                            eval_losses.append(traj_loss_eval.cpu().detach().numpy() / total_time)
+                            print(np.sqrt(current_eval_loss))
+                            eval_losses.append(current_eval_loss)
                             eval_epochs.append(training_iteration)
 
                             # Save the evaluation losses to pickle
@@ -641,6 +754,15 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
                             clamp_type, training_case, BDLO_type))
                             save_pickle(eval_epochs, "../training_record/eval_%s_epoches_DEFT_%s_%s.pkl" % (
                             clamp_type, training_case, BDLO_type))
+                            
+                            # changed to have minimum training iterations and only run during grid search
+                            if grid_search and training_iteration >= 500 and early_stopping_tracker(current_eval_loss):
+                                print(f"\nEarly stopping triggered at iteration {training_iteration}")
+                                print(f"\nEval loss consistently increasing. Best loss: {early_stopping_tracker.best_loss}")
+                                # Close progress bars before returning to prevent display issues
+                                eval_bar.close()
+                                bar.close()
+                                return early_stopping_tracker.best_loss, True  # Return best loss and early stop flag
 
                 # Increment steps and iteration
                 save_steps += 1
@@ -690,7 +812,101 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
                             "../training_record/train_%s_loss_DEFT_%s_%s.pkl" % (clamp_type, training_case, BDLO_type))
                 save_pickle(training_epochs,
                             "../training_record/train_%s_step_DEFT_%s_%s.pkl" % (clamp_type, training_case, BDLO_type))
+    
+    # Training completed without early stopping - return final metrics
+    final_eval_loss = eval_losses[-1] if eval_losses else float('inf')
+    return final_eval_loss, False  # False = didn't stop early
 
+# changed: function to loop through grid search pairings 
+def grid_search_train(base_args, param_grid):
+    """
+    Perform grid search over hyperparameters
+    
+    param_grid example:
+    {
+        'bend_stiffness_parent': [2e-3, 3e-3, 4e-3, 5e-3],
+        'bend_stiffness_child1': [2e-3, 3e-3, 4e-3],
+        'bend_stiffness_child2': [2e-3, 3e-3, 4e-3],
+        'damping_parent': [2.0, 2.5, 3.0, 3.5],
+        'damping_child1': [2.0, 2.5, 3.0, 3.5],
+        'damping_child2': [2.0, 2.5, 3.0, 3.5],
+    }
+    """
+    # Generate all combinations
+    param_names = list(param_grid.keys())
+    param_values = list(param_grid.values())
+    combinations = list(itertools.product(*param_values)) # 729 combinations
+    
+    results = []
+    
+    print(f"Starting grid search with {len(combinations)}...")
+    
+    for idx, param_combo in enumerate(combinations, start=3): # try training case 5
+        config = dict(zip(param_names, param_combo))
+        print(f"\n{'='*60}")
+        print(f"Configuration {idx+1}/{len(combinations)}") # increase training case number
+        print(f"Training Case: grid_search_{idx}")
+        print(f"Parameters: {config}")
+        print(f"{'='*60}\n")
+        
+        # call train with specific args
+        final_eval_loss, stopped_early = train_with_config(base_args, config, idx)
+        
+        results.append({
+            'config': config,
+            'final_eval_loss': final_eval_loss,
+            'stopped_early': stopped_early
+        })
+        
+        # Save intermediate results (includes config index)
+        save_pickle(results, "../training_record/grid_search_results_%s_case%s.pkl" % (base_args.BDLO_type, idx))
+    
+    # Find best configuration
+    best_result = min(results, key=lambda x: x['final_eval_loss'])
+    print(f"\n{'='*60}")
+    print("GRID SEARCH COMPLETE")
+    print(f"Best configuration: {best_result['config']}")
+    print(f"Best eval loss: {best_result['final_eval_loss']}")
+    print(f"{'='*60}\n")
+    
+    return results, best_result
+
+# changed: specific train fuction for grid search config and increment training case
+def train_with_config(base_args, param_config, config_index):
+    """
+    Modified train function that accepts parameter configuration
+    and returns final eval loss + early stopping flag
+    """
+    # calls train with args from current grid search configuration
+    # returns: final_eval_loss, stopped_early_flag
+    final_eval_loss, stopped_early = train(
+        train_batch=base_args.train_batch,
+        BDLO_type=base_args.BDLO_type,
+        total_time=base_args.total_time,
+        train_time_horizon=base_args.train_time_horizon,
+        undeform_vis=base_args.undeform_vis,
+        inference_vis=base_args.inference_vis,
+        inference_1_batch=base_args.inference_1_batch,
+        residual_learning=base_args.residual_learning,
+        clamp_type=base_args.clamp_type,
+        load_model=base_args.load_model,
+        dt=base_args.dt,
+        data_dt=base_args.data_dt,
+        frame_stride=base_args.frame_stride,
+        integration_substeps=base_args.integration_substeps,
+        # Grid search parameters:
+        bend_stiffness_parent_init=param_config.get('bend_stiffness_parent'),
+        bend_stiffness_child1_init=param_config.get('bend_stiffness_child1'),
+        bend_stiffness_child2_init=param_config.get('bend_stiffness_child2'),
+        damping_parent_init=param_config.get('damping_parent'),
+        damping_child1_init=param_config.get('damping_child1'),
+        damping_child2_init=param_config.get('damping_child2'),
+        early_stopping_patience=5,
+        training_case=config_index,  # make a new training case with each config
+        grid_search=True,  # Enable early stopping for grid search
+    )
+    
+    return final_eval_loss, stopped_early
 
 if __name__ == "__main__":
     # Setting up a command-line interface for hyperparameters and options
@@ -718,11 +934,24 @@ if __name__ == "__main__":
     # clamp_type indicates how the BDLO is clamped (ends or middle)
     parser.add_argument("--clamp_type", type=str, default="ends")
 
-    # total_time is the maximum number of timesteps we have in the dataset (e.g. 500)
-    parser.add_argument("--total_time", type=int, default=500)
+     # total_time is the number of *effective* timesteps returned by the dataloader / simulated by the model.
+    # Example: if dataset is sampled at data_dt=0.01 and you set dt=0.05 (frame_stride=5),
+    # you should set total_time=100 to cover the same 5 seconds as 500 raw frames.
+    parser.add_argument("--total_time", type=int, default=500)  # changed 500 -> 250
 
     # train_time_horizon is how many timesteps we simulate in each training iteration
-    parser.add_argument("--train_time_horizon", type=int, default=50)
+    parser.add_argument("--train_time_horizon", type=int, default=10) # changed 50 -> 10 
+
+    # Simulation timestep (seconds per step in the DEFT integrator)
+    parser.add_argument("--dt", type=float, default=0.02)
+    # Dataset sampling timestep (seconds per frame in the stored pickles)
+    parser.add_argument("--data_dt", type=float, default=0.01)
+    # Optional explicit downsampling stride (overrides dt/data_dt if provided)
+    parser.add_argument("--frame_stride", type=int, default=None)
+
+    # Numerical integration substeps per timestep (dt is split into dt/substeps).
+    # Example: dt=0.02, integration_substeps=2 => internal dt_sub=0.01 for more stable dynamics.
+    parser.add_argument("--integration_substeps", type=int, default=2)
 
     # Whether to visualize the initial undeformed vertices
     parser.add_argument("--undeform_vis", type=bool, default=False)
@@ -742,6 +971,17 @@ if __name__ == "__main__":
     # load trained model
     parser.add_argument("--load_model", type=bool, default=False)
 
+    # changed by felicia: add grid search flag
+    parser.add_argument("--grid_search", type=bool, default=False)
+
+    # Parameters for training specific configurations (optional, overrides defaults)
+    parser.add_argument("--bend_stiffness_parent", type=float, default=None)
+    parser.add_argument("--bend_stiffness_child1", type=float, default=None)
+    parser.add_argument("--bend_stiffness_child2", type=float, default=None)
+    parser.add_argument("--damping_parent", type=float, default=None)
+    parser.add_argument("--damping_child1", type=float, default=None)
+    parser.add_argument("--damping_child2", type=float, default=None)
+
     # Flags for which branches are clamped
     clamp_parent = True
     clamp_child1 = False
@@ -755,16 +995,41 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Call the training function with the user-specified arguments
-    train(
-        train_batch=args.train_batch,
-        BDLO_type=args.BDLO_type,
-        total_time=args.total_time,
-        train_time_horizon=args.train_time_horizon,
-        undeform_vis=args.undeform_vis,
-        inference_vis=args.inference_vis,
-        inference_1_batch=args.inference_1_batch,
-        residual_learning=args.residual_learning,
-        clamp_type=args.clamp_type,
-        load_model=args.load_model
-    )
+    # Activate grid search if specified 
+    if args.grid_search:
+        # Define your parameter grid
+        param_grid = {
+            'bend_stiffness_parent': [3e-3, 4e-3, 5e-3],
+            'bend_stiffness_child1': [3e-3, 4e-3, 5e-3],
+            'bend_stiffness_child2': [3e-3, 4e-3, 5e-3],
+            'damping_parent': [2.0, 2.5, 3.0],
+            'damping_child1': [2.5, 3.0, 3.5],
+            'damping_child2': [2.5, 3.0, 3.5],
+        }
+        
+        results, best_config = grid_search_train(args, param_grid)
+    else:
+        # Call the training function with the user-specified arguments
+        train(
+            train_batch=args.train_batch,
+            BDLO_type=args.BDLO_type,
+            total_time=args.total_time,
+            train_time_horizon=args.train_time_horizon,
+            undeform_vis=args.undeform_vis,
+            inference_vis=args.inference_vis,
+            inference_1_batch=args.inference_1_batch,
+            residual_learning=args.residual_learning,
+            clamp_type=args.clamp_type,
+            load_model=args.load_model,
+            dt=args.dt,
+            data_dt=args.data_dt,
+            frame_stride=args.frame_stride,
+            integration_substeps=args.integration_substeps,
+            # Specific parameter configuration (if provided)
+            bend_stiffness_parent_init=args.bend_stiffness_parent,
+            bend_stiffness_child1_init=args.bend_stiffness_child1,
+            bend_stiffness_child2_init=args.bend_stiffness_child2,
+            damping_parent_init=args.damping_parent,
+            damping_child1_init=args.damping_child1,
+            damping_child2_init=args.damping_child2,
+        )
