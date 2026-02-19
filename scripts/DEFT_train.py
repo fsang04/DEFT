@@ -519,6 +519,10 @@ def train(
         learning_weight=learning_weight
     )
 
+    # from Shicheng: Numerical integration substeps (stability vs. compute trade-off)
+    DEFT_sim_train.integration_substeps = int(integration_substeps)
+    DEFT_sim_eval.integration_substeps = int(integration_substeps)
+
     # Load pretrained models for initialization depending on BDLO_type and clamp_type
     if load_model:
         if BDLO_type == 1 and clamp_type == "ends":
@@ -534,6 +538,10 @@ def train(
         if BDLO_type == 4:
             DEFT_sim_train.load_state_dict(torch.load("../save_model/BDLO4/DEFT_4_40_3.pth"), strict=False)
     
+    # Re-apply substeps (defensive) in case future checkpoints touch the attribute
+    DEFT_sim_train.integration_substeps = int(integration_substeps)
+    DEFT_sim_eval.integration_substeps = int(integration_substeps)
+
     # If we want to visualize the undeformed states
     if undeform_vis:
         # Visualize the first batch's undeformed state

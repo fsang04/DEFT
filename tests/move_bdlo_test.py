@@ -541,8 +541,8 @@ def animate_prediction(predicted_vertices, target_vertices, skip_frames=2, title
 if __name__ == "__main__":
     # checkpoint_path = "/home/yizhouch/DEFT_2025/save_model/DEFT_ends_1_3520_1.pth"
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    # checkpoint_path = os.path.join(repo_root, "save_model", "DEFT_ends_1_2000_5.pth")
-    checkpoint_path = os.path.join(repo_root, "save_model", "DEFT_ends_1_3520_1_original.pth")
+    checkpoint_path = os.path.join(repo_root, "save_model", "DEFT_ends_1_1500_5.pth")
+    # checkpoint_path = os.path.join(repo_root, "save_model", "DEFT_ends_1_3520_1_original.pth")
 
     print("Loading and predicting with trained model...")
     pred_verts, pred_vels, target = move_bdlo_with_data(checkpoint_path=checkpoint_path)
@@ -570,7 +570,8 @@ if __name__ == "__main__":
     number_test = len(test_loader)
     success_count = 0
 
-    for i, (previous_b_DLOs_vertices_traj, b_DLOs_vertices_traj, target_b_DLOs_vertices_traj) in enumerate(test_loader):
+    # added fixed end
+    for i, (previous_b_DLOs_vertices_traj, b_DLOs_vertices_traj, target_b_DLOs_vertices_traj, pulled_end) in enumerate(test_loader):
     
         parent_clamped_selection = torch.tensor((0, 1, -2, -1))
         custom_control = create_custom_trajectory(b_DLOs_vertices_traj, SIM_TIME_HORIZON, parent_clamped_selection)

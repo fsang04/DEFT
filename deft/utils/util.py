@@ -1084,7 +1084,8 @@ class Eval_DEFTData(Dataset):
                 .view(3, total_time, -1).permute(1, 2, 0)
             if frame_stride > 1:
                 verts = verts[::frame_stride]
-                total_length = verts.shape[0]
+            
+            total_length = verts.shape[0]
 
             parent_vertices = verts[:, :n_parent_vertices]
             child1_vertices = verts[:, n_parent_vertices: n_parent_vertices + n_child1_vertices - 1]
@@ -1129,7 +1130,7 @@ class Test_DEFTData(Dataset):
     """
 
     def __init__(self, BDLO_type, n_parent_vertices, n_children_vertices, n_branch,
-                 rigid_body_coupling_index, eval_set_number, total_time, eval_time_horizon, device):
+                 rigid_body_coupling_index, eval_set_number, total_time, eval_time_horizon, device, frame_stride):
         super(Test_DEFTData, self).__init__()
         # Root directory for evaluation data
         # changed by Shicheng
@@ -1137,10 +1138,13 @@ class Test_DEFTData(Dataset):
         self.root_dir = repo_root / "dataset" / f"BDLO{BDLO_type}" / "test"
         file_list = sorted(self.root_dir.glob("*"))
         self.device = device
+        self.frame_stride = frame_stride  # changed
 
         self.BDLOs_previous_vertices = []
         self.BDLOs_vertices = []
         self.BDLOs_target_vertices = []
+
+        self.pulled_end = []
 
         n_child1_vertices, n_child2_vertices = n_children_vertices
 
@@ -1193,9 +1197,13 @@ class Test_DEFTData(Dataset):
             child1_vertices = verts[:, n_parent_vertices: n_parent_vertices + n_child1_vertices - 1]
             child2_vertices = verts[:, n_parent_vertices + n_child1_vertices - 1:]
 
-            # BDLO_vert_no_trans = construct_BDLOs_data(total_time, rigid_body_coupling_index,
-            #                                           n_parent_vertices, n_children_vertices,
-            #                                           n_branch, parent_vertices, child1_vertices, child2_vertices)
+            head_motion = torch.norm(parent_vertices[1:, 0] - parent_vertices[:-1, 0], dim=1).mean()
+            end_motion  = torch.norm(parent_vertices[1:, -1] - parent_vertices[:-1, -1], dim=1).mean()
+
+            # if the head side is pulled then pulled_end = 0, if the end is pulled, then pulled_end = 1
+            clamped_end = 0 if head_motion < end_motion else 1
+            pulled_end  = 1 if clamped_end == 0 else 0
+            self.pulled_end.append(pulled_end)
 
             BDLO_vert_no_trans = construct_BDLOs_data(
                 used_time, rigid_body_coupling_index,
@@ -1207,17 +1215,40 @@ class Test_DEFTData(Dataset):
             BDLO_vert[:, :, :, 0] = -BDLO_vert_no_trans[:, :, :, 2]
             BDLO_vert[:, :, :, 1] = -BDLO_vert_no_trans[:, :, :, 0]
             BDLO_vert[:, :, :, 2] = BDLO_vert_no_trans[:, :, :, 1]
+            
+            # # We only take the first [eval_time_horizon] chunk for the previous, current, target.
+            # if not BDLO_vert[0: 0 + eval_time_horizon].size() == (eval_time_horizon, n_branch, n_parent_vertices, 3):
+            #     print("False Size")
+            # self.BDLOs_previous_vertices.append(BDLO_vert[0: 0 + eval_time_horizon].numpy())
+            # self.BDLOs_vertices.append(BDLO_vert[1: 1 + eval_time_horizon].numpy())
+            # self.BDLOs_target_vertices.append(BDLO_vert[2: 2 + eval_time_horizon].numpy())
 
-            # We only take the first [eval_time_horizon] chunk for the previous, current, target.
-            if not BDLO_vert[0: 0 + eval_time_horizon].size() == (eval_time_horizon, n_branch, n_parent_vertices, 3):
-                print("False Size")
-            self.BDLOs_previous_vertices.append(BDLO_vert[0: 0 + eval_time_horizon].numpy())
-            self.BDLOs_vertices.append(BDLO_vert[1: 1 + eval_time_horizon].numpy())
-            self.BDLOs_target_vertices.append(BDLO_vert[2: 2 + eval_time_horizon].numpy())
+            # --- FRAME STRIDE ADJUSTMENT ---
+            # Instead of taking sequential indices [0, 1, 2], we take [0, stride, 2*stride]
+            # We also ensure the sliced length matches the eval_time_horizon
+            # Final window must fit within the available strided indices
+            start_prev = 0
+            start_curr = self.frame_stride
+            start_target = 2 * self.frame_stride
+
+            # --- FRAME STRIDE ADJUSTMENT ---
+            # Calculate required indices for a 1-second rollout (eval_time_horizon steps)
+            # The indices for the 'target' trajectory will look like: 
+            # [2*stride, 3*stride, ..., (eval_time_horizon + 1)*stride]
+            idx_prev = np.arange(start_prev, start_prev + eval_time_horizon * self.frame_stride, self.frame_stride)
+            idx_curr = np.arange(start_curr, start_curr + eval_time_horizon * self.frame_stride, self.frame_stride)
+            idx_target = np.arange(start_target, start_target + eval_time_horizon * self.frame_stride, self.frame_stride)
+
+            if idx_target[-1] < BDLO_vert.shape[0]:
+                self.BDLOs_previous_vertices.append(BDLO_vert[idx_prev].numpy())
+                self.BDLOs_vertices.append(BDLO_vert[idx_curr].numpy())
+                self.BDLOs_target_vertices.append(BDLO_vert[idx_target].numpy())
+                self.pulled_end.append(pulled_end)
 
         self.previous_vertices = np.array(self.BDLOs_previous_vertices)
         self.vertices = np.array(self.BDLOs_vertices)
         self.target_vertices = np.array(self.BDLOs_target_vertices)
+        self.pulled_end = np.array(self.pulled_end)
 
     def __len__(self):
         # Number of evaluation sequences
@@ -1228,6 +1259,8 @@ class Test_DEFTData(Dataset):
         previous_vertices = torch.tensor(self.previous_vertices[index]).to(self.device)
         vertices = torch.tensor(self.vertices[index]).to(self.device)
         target_vertices = torch.tensor(self.target_vertices[index]).to(self.device)
+        pulled_end = torch.tensor(self.pulled_end[index]).to(self.device)
         return (previous_vertices.clone().detach(),
                 vertices.clone().detach(),
-                target_vertices.clone().detach())
+                target_vertices.clone().detach(),
+                pulled_end.clone().detach())

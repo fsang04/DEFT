@@ -190,6 +190,12 @@ class DEFT_sim(nn.Module):
         self.integration_ratio = nn.Parameter(torch.tensor(1., device=device))
         self.velocity_ratio = nn.Parameter(torch.tensor(0., device=device))
 
+        # from shicheng: Number of internal substeps used inside Numerical_Integration.
+        # This improves stability for larger dt (e.g. 0.05) without changing the
+        # external dt used for rollout length / data alignment.
+        # NOTE: This is a plain Python int (not part of state_dict).
+        self.integration_substeps: int = 1
+
         # zero_mask: tracks vertices that may not exist (e.g., in shorter child branches)
         self.zero_mask = torch.all(b_undeformed_vert[:, 1:] == 0, dim=-1)
 
@@ -693,19 +699,37 @@ class DEFT_sim(nn.Module):
         Update positions and velocities in a forward-Euler style integration.
         The velocity is updated with (Total_force / mass) * dt, then positions are integrated.
         """
-        # velocity update
-        b_DLOs_velocity = b_DLOs_velocity.clone() + (
-            (
-                Total_force.unsqueeze(dim=-2)
-                - b_DLOs_velocity.unsqueeze(dim=-2) * damping.repeat(self.batch).clone().view(-1, 1, 1, 1)
-                  * self.mass_diagonal.repeat(self.batch, 1).unsqueeze(dim=-1).unsqueeze(dim=-1)
-            )
-            @ torch.linalg.pinv(mass_matrix)
-            * dt
-        ).reshape(-1, b_DLOs_velocity.size()[1], 3)
+        # from shicheng: Substepping for stability (especially when dt is large and stiffness is high).
+        # this ensures that physical constraints are still enforced at dt = 0.01, even though
+        # constraint solver is called at dt =0.02
+        substeps = int(getattr(self, "integration_substeps", 1) or 1)
+        if substeps < 1:
+            substeps = 1
+        dt_sub = dt / float(substeps)
 
-        # position update
-        b_DLOs_vertices = b_DLOs_vertices.clone() + b_DLOs_velocity * dt * integration_ratio.clone()
+        inv_mass = torch.linalg.pinv(mass_matrix)
+        damping_term = (
+            damping.repeat(self.batch).clone().view(-1, 1, 1, 1)
+            * self.mass_diagonal.repeat(self.batch, 1).unsqueeze(dim=-1).unsqueeze(dim=-1)
+        )
+
+        b_DLOs_velocity = b_DLOs_velocity.clone()
+        b_DLOs_vertices = b_DLOs_vertices.clone()
+        
+        for _ in range(substeps): # added 
+            # velocity update
+            b_DLOs_velocity = b_DLOs_velocity.clone() + (
+                (
+                    Total_force.unsqueeze(dim=-2)
+                    - b_DLOs_velocity.unsqueeze(dim=-2) * damping.repeat(self.batch).clone().view(-1, 1, 1, 1)
+                    * self.mass_diagonal.repeat(self.batch, 1).unsqueeze(dim=-1).unsqueeze(dim=-1)
+                )
+                @ torch.linalg.pinv(mass_matrix)
+                * dt
+            ).reshape(-1, b_DLOs_velocity.size()[1], 3)
+
+            # position update
+            b_DLOs_vertices = b_DLOs_vertices.clone() + b_DLOs_velocity * dt * integration_ratio.clone()
 
         return b_DLOs_vertices, b_DLOs_velocity
 
