@@ -87,17 +87,18 @@ def train(
     damping_child1_init=None,
     damping_child2_init=None,
     early_stopping_patience=5,  # changed: Number of eval periods before stopping
-    training_case=5,  # changed: currently set to 5 for testing.  pass as parameter t incremenet during grid search
+    training_case=0,  # changed: currently set to 5 for testing.  pass as parameter t incremenet during grid search
     grid_search=False,  # changed: flag to enable early stopping only during grid search
 ):  
-    # total_time is the number of *effective* timesteps returned by the dataloader / simulated by the model.
-    #
+    
     # If the dataset pickles are recorded at `data_dt` (e.g. 0.01s) but we want to simulate at a larger
     # timestep `dt` (e.g. 0.05s), we downsample dataset frames by:
     #   frame_stride = dt / data_dt   (must be an integer)
     #
-    # The dataset reader will then load `total_time * frame_stride` raw frames from disk and keep every
+    # The dataset reader will then load `eval_time_horizon * frame_stride` raw frames from disk and keep every
     # `frame_stride`-th frame, returning sequences of length `total_time` that match the simulation dt.
+    frame_stride = int(dt / data_dt)  
+
     if frame_stride is None:
         frame_stride = int(round(dt / data_dt))
     if frame_stride < 1:
@@ -177,8 +178,8 @@ def train(
         bs_child1_val = bend_stiffness_child1_init if bend_stiffness_child1_init else 4e-3
         bs_child2_val = bend_stiffness_child2_init if bend_stiffness_child2_init else 4e-3
         damp_parent_val = damping_parent_init if damping_parent_init else 2.5
-        damp_child1_val = damping_child1_init if damping_child1_init else 3.0
-        damp_child2_val = damping_child2_init if damping_child2_init else 3.0
+        damp_child1_val = damping_child1_init if damping_child1_init else 2.5
+        damp_child2_val = damping_child2_init if damping_child2_init else 2.5
 
         bend_stiffness_parent = nn.Parameter(bs_parent_val * torch.ones((1, 1, n_edge), device=device))
         bend_stiffness_child1 = nn.Parameter(bs_child1_val * torch.ones((1, 1, n_edge), device=device))
@@ -750,7 +751,7 @@ def train(
                             )
 
                             # changed: After evaluation, check for early stopping in grid search
-                            current_eval_loss = traj_loss_eval.cpu().detach().numpy() / total_time
+                            current_eval_loss = traj_loss_eval.cpu().detach().numpy() / (total_time // frame_stride) # changed
 
                             # Print and record the average loss
                             print(np.sqrt(current_eval_loss))
@@ -764,7 +765,7 @@ def train(
                             clamp_type, training_case, BDLO_type))
                             
                             # changed to have minimum training iterations and only run during grid search
-                            if grid_search and training_iteration >= 500 and early_stopping_tracker(current_eval_loss):
+                            if grid_search and training_iteration >= 1000 and early_stopping_tracker(current_eval_loss):
                                 print(f"\nEarly stopping triggered at iteration {training_iteration}")
                                 print(f"\nEval loss consistently increasing. Best loss: {early_stopping_tracker.best_loss}")
                                 # Close progress bars before returning to prevent display issues
@@ -849,10 +850,10 @@ def grid_search_train(base_args, param_grid):
     
     print(f"Starting grid search with {len(combinations)}...")
     
-    for idx, param_combo in enumerate(combinations, start=3): # try training case 5
+    for idx, param_combo in enumerate(combinations): 
         config = dict(zip(param_names, param_combo))
         print(f"\n{'='*60}")
-        print(f"Configuration {idx+1}/{len(combinations)}") # increase training case number
+        print(f"Configuration {idx}/{len(combinations)-1}") # increase training case number
         print(f"Training Case: grid_search_{idx}")
         print(f"Parameters: {config}")
         print(f"{'='*60}\n")
@@ -909,7 +910,7 @@ def train_with_config(base_args, param_config, config_index):
         damping_parent_init=param_config.get('damping_parent'),
         damping_child1_init=param_config.get('damping_child1'),
         damping_child2_init=param_config.get('damping_child2'),
-        early_stopping_patience=5,
+        early_stopping_patience=8,
         training_case=config_index,  # make a new training case with each config
         grid_search=True,  # Enable early stopping for grid search
     )
@@ -942,6 +943,7 @@ if __name__ == "__main__":
     # clamp_type indicates how the BDLO is clamped (ends or middle)
     parser.add_argument("--clamp_type", type=str, default="ends")
 
+    # total_time is the maximum number of timesteps we have in the dataset (e.g. 500)
      # total_time is the number of *effective* timesteps returned by the dataloader / simulated by the model.
     # Example: if dataset is sampled at data_dt=0.01 and you set dt=0.05 (frame_stride=5),
     # you should set total_time=100 to cover the same 5 seconds as 500 raw frames.
@@ -955,7 +957,7 @@ if __name__ == "__main__":
     # Dataset sampling timestep (seconds per frame in the stored pickles)
     parser.add_argument("--data_dt", type=float, default=0.01)
     # Optional explicit downsampling stride (overrides dt/data_dt if provided)
-    parser.add_argument("--frame_stride", type=int, default=None)
+    parser.add_argument("--frame_stride", type=int, default=2)
 
     # Numerical integration substeps per timestep (dt is split into dt/substeps).
     # Example: dt=0.02, integration_substeps=2 => internal dt_sub=0.01 for more stable dynamics.
@@ -980,7 +982,7 @@ if __name__ == "__main__":
     parser.add_argument("--load_model", type=bool, default=False)
 
     # changed by felicia: add grid search flag
-    parser.add_argument("--grid_search", type=bool, default=False)
+    parser.add_argument("--grid_search", type=lambda x: (str(x).lower() == 'true'), default=False)
 
     # Parameters for training specific configurations (optional, overrides defaults)
     parser.add_argument("--bend_stiffness_parent", type=float, default=None)
