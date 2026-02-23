@@ -725,11 +725,11 @@ class DEFT_sim(nn.Module):
                     * self.mass_diagonal.repeat(self.batch, 1).unsqueeze(dim=-1).unsqueeze(dim=-1)
                 )
                 @ torch.linalg.pinv(mass_matrix)
-                * dt
+                * dt_sub # changed 
             ).reshape(-1, b_DLOs_velocity.size()[1], 3)
 
-            # position update
-            b_DLOs_vertices = b_DLOs_vertices.clone() + b_DLOs_velocity * dt * integration_ratio.clone()
+            # position update - changed 
+            b_DLOs_vertices = b_DLOs_vertices.clone() + b_DLOs_velocity * dt_sub * integration_ratio.clone()
 
         return b_DLOs_vertices, b_DLOs_velocity
 
@@ -1323,7 +1323,7 @@ class DEFT_sim(nn.Module):
         predicted_vertices: tensor [batch, time_horizon, n_branch, n_vert, 3]
         predicted_velocities: tensor [batch, time_horizon, n_branch, n_vert, 3]
         """
-        constraint_loop = 20
+        constraint_loop = 10 # 20->10
 
         # Extract clamped positions for each branch
         parent_fix_point = clamped_positions[:, :, 0, self.parent_clamped_selection] if self.clamp_parent else None

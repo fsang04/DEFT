@@ -541,7 +541,7 @@ def animate_prediction(predicted_vertices, target_vertices, skip_frames=2, title
 if __name__ == "__main__":
     # checkpoint_path = "/home/yizhouch/DEFT_2025/save_model/DEFT_ends_1_3520_1.pth"
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    checkpoint_path = os.path.join(repo_root, "save_model", "DEFT_ends_1_2000_5.pth")
+    checkpoint_path = os.path.join(repo_root, "save_model", "DEFT_ends_1_60_0.pth")
 
     print("Loading and predicting with trained model...")
     pred_verts, pred_vels, target = move_bdlo_with_data(checkpoint_path=checkpoint_path)

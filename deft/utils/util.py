@@ -548,7 +548,7 @@ def construct_BDLOs_data(total_length, rigid_body_coupling_index, p_n_vert, cs_n
     Constructs a timeline of branched DLO vertices for a sequence of length total_length.
 
     Args:
-        total_length (int): The total number of timesteps in the data.
+        total_length (int): The total number of timesteps in the data (NOT necessarily same as total_time).
         rigid_body_coupling_index (List[int]): Indices on the parent rod for branching.
         p_n_vert (int): Number of vertices in the parent rod.
         cs_n_vert (List[int]): Number of vertices in each child rod.
@@ -958,11 +958,16 @@ class Train_DEFTData(Dataset):
     """
 
     def __init__(self, BDLO_type, n_parent_vertices, n_children_vertices, n_branch,
-                 rigid_body_coupling_index, train_set_number, total_time, training_time_horizon, device, frame_stride: int = 1):
+                 rigid_body_coupling_index, train_set_number, total_time, training_time_horizon, device, frame_stride: int = 2):
         super(Train_DEFTData, self).__init__()
         # Root directory containing data
-        self.root_dir = "../dataset/BDLO%s/train/" % BDLO_type
-        file_list = glob.glob(self.root_dir + "*")
+        # self.root_dir = "../dataset/BDLO%s/train/" % BDLO_type
+        # file_list = glob.glob(self.root_dir + "*")
+
+        # from Shicheng
+        repo_root = Path(__file__).resolve().parents[2]
+        self.root_dir = repo_root / "dataset" / f"BDLO{BDLO_type}" / "train"
+        file_list = sorted(self.root_dir.glob("*"))
         self.device = device
 
         # Preallocate data holders
@@ -992,13 +997,17 @@ class Train_DEFTData(Dataset):
             verts = torch.tensor(pd.read_pickle(r'%s' % str(rope_data))) \
                 .view(3, total_time, -1).permute(1, 2, 0)
 
+            if frame_stride > 1:
+                verts = verts[::frame_stride]
+            total_length = verts.shape[0]
+
             # Separate into parent, child1, child2
             parent_vertices = verts[:, :n_parent_vertices]
             child1_vertices = verts[:, n_parent_vertices: n_parent_vertices + n_child1_vertices - 1]
             child2_vertices = verts[:, n_parent_vertices + n_child1_vertices - 1:]
 
             # Construct the branched rod data structure for the entire time sequence
-            BDLO_vert_no_trans = construct_BDLOs_data(total_time, rigid_body_coupling_index,
+            BDLO_vert_no_trans = construct_BDLOs_data(total_length, rigid_body_coupling_index,
                                                       n_parent_vertices, n_children_vertices,
                                                       n_branch, parent_vertices, child1_vertices, child2_vertices)
             # Transform from (x,y,z)->(-z, -x, y) for user coordinate system
@@ -1010,7 +1019,7 @@ class Train_DEFTData(Dataset):
             mu_0_list = torch.zeros(verts.size()[0] - 1 - 1, n_branch, 3).to(self.device)
 
             # Build up sequences (previous, current, next) for the training horizon
-            for i in range(total_time - 1 - training_time_horizon):
+            for i in range(total_length - 1 - training_time_horizon): # changed from total_time
                 # The size check ensures each chunk is [training_time_horizon, n_branch, n_parent_vertices, 3]
                 if not BDLO_vert[i: i + training_time_horizon].size() == (
                 training_time_horizon, n_branch, n_parent_vertices, 3):
@@ -1084,9 +1093,8 @@ class Eval_DEFTData(Dataset):
                 .view(3, total_time, -1).permute(1, 2, 0)
             if frame_stride > 1:
                 verts = verts[::frame_stride]
-            
             total_length = verts.shape[0]
-
+            
             parent_vertices = verts[:, :n_parent_vertices]
             child1_vertices = verts[:, n_parent_vertices: n_parent_vertices + n_child1_vertices - 1]
             child2_vertices = verts[:, n_parent_vertices + n_child1_vertices - 1:]
