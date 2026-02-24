@@ -6,3 +6,15 @@ Fail cases are (one-based): [4, 5, 6, 7, 9, 10, 11, 12, 14, 22, 31, 37, 38]
 ===== 2026-02-23 03:04:50 =====
 Success count: 34 out of 40 tests.
 Fail cases are (one-based): [4, 8, 9, 10, 11, 38]
+
+===== 2026-02-23 10:57:50 =====
+Success count: 32 out of 40 tests.
+Fail cases are (one-based): [4, 5, 6, 10, 11, 14, 37, 38]
+
+===== 2026-02-23 17:24:09 =====
+Success count: 36 out of 40 tests.
+Fail cases are (one-based): [9, 22, 36, 40]
+
+===== 2026-02-23 19:41:53 =====
+Success count: 37 out of 40 tests.
+Fail cases are (one-based): [36, 38, 40]

@@ -567,7 +567,7 @@ if __name__ == "__main__":
     # changed by Shicheng
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     # checkpoint_path = os.path.join(repo_root, "save_model", "DEFT_ends_1_3520_1.pth")
-    checkpoint_path = os.path.join(repo_root, "save_model", "DEFT_ends_1_2500_0.pth")
+    checkpoint_path = os.path.join(repo_root, "save_model", "DEFT_ends_1_100_0.pth")
     
     print("Loading and predicting with trained model...")
     pred_verts, pred_vels, target = move_bdlo_with_data(checkpoint_path=checkpoint_path)
@@ -596,7 +596,7 @@ if __name__ == "__main__":
 
     fail_list = []
 
-    anim_dir = Path(__file__).resolve().parent / "testing_animations_ends_1_1740_10"
+    anim_dir = Path(__file__).resolve().parent / "testing_animations_ends_1_100_0"
     anim_dir.mkdir(parents=True, exist_ok=True)
 
     for i, (previous_b_DLOs_vertices_traj, b_DLOs_vertices_traj, target_b_DLOs_vertices_traj, pulled_end) in enumerate(test_loader):

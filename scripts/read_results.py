@@ -5,7 +5,7 @@ import numpy as np
 """example of reading pkl files"""
 
 clamp_type = "ends"
-training_case = 0
+training_case = 23
 BDLO_type = 1
 eval_loss_1 = np.array(pd.read_pickle(r"../training_record/eval_%s_loss_DEFT_%s_%s.pkl" % (clamp_type, training_case, BDLO_type)))
 eval_step_1 = np.array(pd.read_pickle(r"../training_record/eval_%s_epoches_DEFT_%s_%s.pkl" % (clamp_type, training_case, BDLO_type)))
